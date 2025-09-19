@@ -72,4 +72,4 @@ const yojanas = [
   }
 ];
 
-module.exports = yojanas;l
+module.exports = yojanas;
