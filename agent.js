@@ -38,6 +38,7 @@ const ChatRequestSchema = z.object({
             userId: z.string().optional(),
             locale: z.string().optional(),
             app: z.string().optional(),
+            awaitingAge: z.boolean().optional(), // ✅ track if bot is waiting for age
         })
         .optional(),
 });
@@ -72,10 +73,10 @@ const linkCatalog = [
 function buildSystemPrompt(context) {
     return `You are a helpful assistant for a Disability Yojana chatbot.
 Follow these rules strictly:
-1. If the query is about Yojana/scheme and age, disability type, or percentage is missing, ask the user politely for the missing info.
-2. Once all details are provided, filter Yojanas from dataset and return top 3 matches with name and description.
-3. Never invent URLs, only use known links from the catalog.
-4. Only answer about Disability Portal (Yojanas, login, register). Reject unrelated queries.
+1. If the query is about Yojana or scheme and no age is provided, ask for the user's age.
+2. If an age is given, filter from the Yojana dataset and return the top 3 matching schemes.
+3. For any other queries, respond concisely and factually. 
+4. Include resource links only from the catalog, never invent URLs.
 
 Context: ${JSON.stringify(context || {}, null, 2)}
 Available resources: ${JSON.stringify(linkCatalog, null, 2)}
@@ -100,9 +101,6 @@ function coerceGeminiJson(text) {
     }
 }
 
-// --- Store session per user ---
-const userSessions = new Map();
-
 // --- Routes ---
 app.post("/api/chat", async (req, res) => {
     const parsed = ChatRequestSchema.safeParse(req.body);
@@ -110,61 +108,107 @@ app.post("/api/chat", async (req, res) => {
         return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     }
 
+    const userContext = new Map();
     const { message, context = {} } = parsed.data;
+    const apiKey = process.env.GEMINI_API_KEY;
+
     const userId = context?.userId || "default";
 
-    // Get or initialize session
-    if (!userSessions.has(userId)) {
-        userSessions.set(userId, { age: null, disability: null, percentage: null });
+    // Get user session (store age & disability)
+    if (!userContext.has(userId)) {
+        userContext.set(userId, { age: null, disability: null });
     }
-    const session = userSessions.get(userId);
+    const session = userContext.get(userId);
 
-    // --- 1. Extract info from user message ---
-    const ageMatch = message.match(/\b(\d{1,3})\b/);
-    if (ageMatch) session.age = parseInt(ageMatch[1]);
+    // --- 1. Detect Age from message ---
+    const ageMatch = message.match(/\b(\d{1,2})\b/); // finds numbers like 25, 55
+    if (ageMatch) {
+        session.age = parseInt(ageMatch[1]);
+    }
 
+    // --- 2. Detect disability type from keywords ---
     if (/vision|blind|eyes?/i.test(message)) session.disability = "vision disability";
     if (/hearing|deaf|ear/i.test(message)) session.disability = "hearing disability";
     if (/hand|arm|limb/i.test(message)) session.disability = "physical disability";
 
-    const percentMatch = message.match(/(\d{1,3})\s?%/);
-    if (percentMatch) session.percentage = parseInt(percentMatch[1]);
 
-    // --- 2. Ask for missing info first ---
-    if (!session.age || !session.disability || !session.percentage) {
+    // ✅ Step 1: Detect Yojana/scheme query
+    if (/yojana|scheme/i.test(message) && !session.age) {
+        return res.json({ message: "Please tell me your age so I can suggest the best schemes for you.", links: [] });
+    }
+
+    // --- 4. If we have age → filter schemes ---
+    if (session.age) {
+        const eligible = yojanas.filter(y => session.age >= y.Start_Age && session.age <= y.UpTo_Age);
+        const top3 = eligible.slice(0, 3);
+
+        if (top3.length > 0) {
+            return res.json({
+                message: `Based on your age (${session.age}) ${session.disability ? "and " + session.disability : ""}, here are some Yojanas:`,
+                yojanas: top3,
+                links: []
+            });
+        } else {
+            return res.json({ message: `Sorry, no Yojana is available for your age (${session.age}).`, links: [] });
+        }
+    }
+
+    // ✅ Step 3: Fallback to Gemini
+    if (!apiKey) {
         return res.json({
-            message: "कृपया आपली माहिती भरा / Please provide your details:",
-            formFields: {
-                age: session.age,
-                disabilityType: session.disability,
-                percentage: session.percentage,
-            },
-            links: [],
+            message: "Developer mode: Set GEMINI_API_KEY to enable AI responses.",
+            links: linkCatalog,
         });
     }
 
-    // --- 3. Filter Yojanas ---
-    let filtered = yojanas.filter(y =>
-        session.age >= y.Start_Age &&
-        session.age <= y.UpTo_Age &&
-        y.tblDivyangTypes.includes(session.disability) &&
-        session.percentage >= y.tblYojanaDivyangTypePercentages
-    );
+    try {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-    if (filtered.length === 0) filtered = yojanas.slice(0, 3);
+        const system = buildSystemPrompt(context);
+        const prompt = `${system}\n\nUser: ${message}\nAssistant:`;
 
-    // --- 4. Clear session after responding ---
-    userSessions.set(userId, { age: null, disability: null, percentage: null });
+        const result = await model.generateContent([{ text: prompt }]);
 
-    // --- 5. Respond with Yojanas ---
-    return res.json({
-        message: `Based on your details (Age: ${session.age}, Disability: ${session.disability}, Percentage: ${session.percentage}), here are some Yojanas:`,
-        yojanas: filtered.map(y => ({
-            name: y.YojanaName,
-            description: y.YojanaDescription,
-        })),
-        links: [],
-    });
+        let text = "";
+        try {
+            text = result.response.text();
+        } catch (e) {
+            console.error("⚠️ Gemini returned no text:", e);
+        }
+
+        if (!text) {
+            return res.json({
+                message: "I couldn’t generate a response, please try again.",
+                links: [],
+            });
+        }
+
+        const json = coerceGeminiJson(text);
+
+        // ✅ Ensure only known links are returned
+        const links = Array.isArray(json.links)
+            ? json.links.filter((out) =>
+                linkCatalog.some((known) =>
+                    known.links?.some((l) => l.url === out.url)
+                )
+            )
+            : [];
+
+        return res.json({
+            message: String(json.message || text).trim(),
+            links,
+            yojanas: json.yojanas || [],
+            context, // maintain context
+        });
+    } catch (err) {
+        console.error("❌ Error in /api/chat:", err);
+        return res.status(500).json({
+            message:
+                "Sorry, there was an issue processing your request. Please try again.",
+            links: [],
+        });
+    }
 });
 
 // --- Health Check ---
