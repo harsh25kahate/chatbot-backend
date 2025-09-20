@@ -127,13 +127,20 @@ function filterYojanas(yojanas, criteria) {
   const { age, disabilityType } = criteria;
   
   return yojanas.filter(yojana => {
-    // Check age range
-    const ageMatch = age >= yojana.Start_Age && age <= yojana.UpTo_Age;
+    // Check age range - ensure Start_Age and UpTo_Age exist
+    const startAge = yojana.Start_Age || 0;
+    const upToAge = yojana.UpTo_Age || 100;
+    const ageMatch = age >= startAge && age <= upToAge;
     
-    // If no specific disability type or if it matches
-    const disabilityMatch = !disabilityType || 
-      yojana.DisabilityType.toLowerCase().includes(disabilityType.toLowerCase()) ||
-      disabilityType.toLowerCase().includes(yojana.DisabilityType.toLowerCase());
+    // If no specific disability type, accept all
+    if (!disabilityType) {
+      return ageMatch;
+    }
+    
+    // Check disability type match - handle undefined DisabilityType
+    const yojanaDisability = yojana.DisabilityType || '';
+    const disabilityMatch = yojanaDisability.toLowerCase().includes(disabilityType.toLowerCase()) ||
+      disabilityType.toLowerCase().includes(yojanaDisability.toLowerCase());
     
     return ageMatch && disabilityMatch;
   });
