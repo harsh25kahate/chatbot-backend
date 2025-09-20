@@ -5,7 +5,6 @@ dotenv.config();
 // --- Dependencies ---
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch"; // make sure node-fetch is installed
 import { z } from "zod";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
@@ -38,12 +37,11 @@ const ChatRequestSchema = z.object({
       userId: z.string().optional(),
       locale: z.string().optional(),
       app: z.string().optional(),
-      awaitingAge: z.boolean().optional(),
     })
     .optional(),
 });
 
-// --- Resource Catalog ---
+// --- Resource Catalog (fixed links only) ---
 const linkCatalog = [
   {
     message: "You can register here",
@@ -60,28 +58,9 @@ const linkCatalog = [
       { label: "Login", url: "https://divyangparbhani.altwise.in/home/login" },
     ],
   },
-  {
-    message:
-      "I can help with divyang portal related issues only. I can't help with that.",
-  },
 ];
 
-// --- Helper: Build system prompt ---
-function buildSystemPrompt(context) {
-  return `You are a helpful assistant for a Disability Yojana chatbot.
-Follow these rules strictly:
-1. If the query is about Yojana or scheme and no age is provided, ask for the user's age.
-2. If an age is given, filter from the Yojana dataset and return the top 3 matching schemes.
-3. For any other queries, respond concisely and factually. 
-4. Include resource links only from the catalog, never invent URLs.
-
-Context: ${JSON.stringify(context || {}, null, 2)}
-Available resources: ${JSON.stringify(linkCatalog, null, 2)}
-
-Output JSON with keys: message (string), optional links (array), and optional yojanas (array).`;
-}
-
-// --- Helper: Coerce AI output to valid JSON ---
+// --- Helper: Coerce Gemini output to valid JSON ---
 function coerceGeminiJson(text) {
   try {
     return JSON.parse(text);
@@ -98,9 +77,6 @@ function coerceGeminiJson(text) {
   }
 }
 
-// --- User session store ---
-const userContext = new Map();
-
 // --- Fetch Yojanas from API ---
 async function fetchYojanas() {
   try {
@@ -115,6 +91,46 @@ async function fetchYojanas() {
   }
 }
 
+// --- Detect if message is casual small talk ---
+function isSmallTalk(msg) {
+  return /^(hi|hello|hey|namaste|नमस्कार|हाय|कसे आहात|how are you)/i.test(msg);
+}
+
+// --- Extract intent from message ---
+function detectIntent(message, yojanas) {
+  const msg = message.toLowerCase();
+
+  // Field-specific queries
+  if (msg.includes("last date") || msg.includes("शेवटची तारीख")) {
+    return { type: "lastDate" };
+  }
+  if (msg.includes("publish date") || msg.includes("प्रकाशित")) {
+    return { type: "publishDate" };
+  }
+  if (msg.includes("published by") || msg.includes("कोण प्रकाशित")) {
+    return { type: "publishedBy" };
+  }
+  if (msg.includes("description") || msg.includes("तपशील") || msg.includes("माहिती")) {
+    return { type: "description" };
+  }
+
+  // If query contains yojana name
+  const found = yojanas.find((y) =>
+    msg.includes(y.YojanaName.toLowerCase())
+  );
+  if (found) {
+    return { type: "yojanaByName", yojana: found };
+  }
+
+  // If query about schemes
+  if (msg.includes("yojana") || msg.includes("scheme") || msg.includes("योजना")) {
+    return { type: "yojanaList" };
+  }
+
+  // Default → small talk or fallback
+  return { type: "other" };
+}
+
 // --- Routes ---
 app.post("/api/chat", async (req, res) => {
   const parsed = ChatRequestSchema.safeParse(req.body);
@@ -126,108 +142,99 @@ app.post("/api/chat", async (req, res) => {
 
   const { message, context = {} } = parsed.data;
   const apiKey = process.env.GEMINI_API_KEY;
-  const userId = context?.userId || "default";
 
-  if (!userContext.has(userId)) {
-    userContext.set(userId, { age: null, disability: null });
-  }
-  const session = userContext.get(userId);
-
-  // --- Detect Age & Disability from message ---
-  const ageMatch = message.match(/\b(\d{1,2})\b/);
-  if (ageMatch) session.age = parseInt(ageMatch[1]);
-
-  if (/vision|blind|eyes?/i.test(message)) session.disability = "vision disability";
-  if (/hearing|deaf|ear/i.test(message)) session.disability = "hearing disability";
-  if (/hand|arm|limb/i.test(message)) session.disability = "physical disability";
-
-  // --- Detect Yojana query ---
-  if (/yojana|scheme/i.test(message) && !session.age) {
-    return res.json({
-      message: "Please tell me your age so I can suggest the best schemes for you.",
-      links: [],
-    });
-  }
-
-  // --- Filter Yojanas if age is present ---
-  if (session.age) {
-    const allYojanas = await fetchYojanas();
-    const eligible = allYojanas.filter((y) => {
-      // Safety: Ensure DisabilityType exists
-      const hasDisability = session.disability
-        ? y.DisabilityType &&
-          y.DisabilityType.toLowerCase().includes(session.disability.toLowerCase())
-        : true; // if user hasn't specified, ignore filter
-
-      return (
-        session.age >= y.Start_Age && session.age <= y.UpTo_Age && hasDisability
-      );
-    });
-
-    const top3 = eligible.slice(0, 3);
-
-    if (top3.length > 0) {
-      return res.json({
-        message: `Based on your age (${session.age})${
-          session.disability ? " and " + session.disability : ""
-        }, here are some Yojanas:`,
-        yojanas: top3,
-        links: [],
-      });
-    } else {
-      return res.json({
-        message: `Sorry, no Yojana is available for your age (${session.age}).`,
-        links: [],
-      });
+  // ✅ If casual talk → Gemini AI (short reply)
+  if (isSmallTalk(message)) {
+    if (!apiKey) {
+      return res.json({ message: "Hello 👋", links: [] });
     }
-  }
-
-  // --- Fallback to Gemini ---
-  if (!apiKey) {
-    return res.json({
-      message: "Developer mode: Set GEMINI_API_KEY to enable AI responses.",
-      links: linkCatalog,
-    });
-  }
-
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const system = buildSystemPrompt(context);
-    const prompt = `${system}\n\nUser: ${message}\nAssistant:`;
-    const result = await model.generateContent([{ text: prompt }]);
-
-    let text = "";
     try {
-      text = result.response.text();
-    } catch (e) {
-      console.error("⚠️ Gemini returned no text:", e);
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const result = await model.generateContent([
+        { text: `Reply shortly to this user greeting in Marathi/Hindi/English: "${message}"` },
+      ]);
+      return res.json({ message: result.response.text(), links: [] });
+    } catch (err) {
+      console.error("⚠️ Gemini error:", err);
+      return res.json({ message: "Hello 👋", links: [] });
     }
+  }
 
-    if (!text)
+  // ✅ Yojana-related queries
+  const yojanas = await fetchYojanas();
+  const intent = detectIntent(message, yojanas);
+
+  switch (intent.type) {
+    case "yojanaByName":
       return res.json({
-        message: "I couldn’t generate a response, please try again.",
-        links: [],
+        message: `${intent.yojana.YojanaName}: ${intent.yojana.YojanaDescription}`,
+        yojanas: [intent.yojana],
       });
 
-    const json = coerceGeminiJson(text);
-    const links = Array.isArray(json.links)
-      ? json.links.filter((out) =>
-          linkCatalog.some((known) => known.links?.some((l) => l.url === out.url))
-        )
-      : [];
+    case "lastDate":
+      return res.json({
+        message: yojanas
+          .map((y) => `${y.YojanaName}: Apply before ${y.YojanaApplayLastDate}`)
+          .join("\n"),
+        yojanas,
+      });
 
-    return res.json({
-      message: String(json.message || text).trim(),
-      links,
-      yojanas: json.yojanas || [],
-      context,
-    });
-  } catch (err) {
-    console.error("❌ Error in /api/chat:", err);
-    return res
-      .status(500)
-      .json({ message: "Sorry, there was an issue processing your request.", links: [] });
+    case "publishDate":
+      return res.json({
+        message: yojanas
+          .map((y) => `${y.YojanaName}: Published on ${y.YojanaPublishDate}`)
+          .join("\n"),
+        yojanas,
+      });
+
+    case "publishedBy":
+      return res.json({
+        message: yojanas
+          .map((y) => `${y.YojanaName}: Published by ${y.PublishedBy}`)
+          .join("\n"),
+        yojanas,
+      });
+
+    case "description":
+      return res.json({
+        message: yojanas
+          .map((y) => `${y.YojanaName}: ${y.YojanaDescription}`)
+          .join("\n"),
+        yojanas,
+      });
+
+    case "yojanaList":
+      return res.json({
+        message: "Here are the available Yojanas:",
+        yojanas,
+      });
+
+    default:
+      // Not yojana → Gemini fallback
+      if (!apiKey) {
+        return res.json({
+          message: "I can only answer about the Disability Portal and Yojanas.",
+          links: linkCatalog,
+        });
+      }
+      try {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const result = await model.generateContent([
+          {
+            text: `You are a chatbot for Disability Portal. Reply concisely (Marathi/Hindi/English) to: "${message}"`,
+          },
+        ]);
+        const text = result.response.text();
+        return res.json({ message: text, links: linkCatalog });
+      } catch (err) {
+        console.error("❌ Gemini error:", err);
+        return res.json({
+          message: "Sorry, there was an issue. Please try again.",
+          links: [],
+        });
+      }
   }
 });
 
