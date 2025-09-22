@@ -68,9 +68,35 @@ function detectAge(msg) {
 // Detect disability
 function detectDisability(msg) {
   const text = msg.toLowerCase();
-  if (['blind','vision','अंध'].some(k => text.includes(k))) return 'vision';
-  if (['deaf','hearing','कर्णबधीर'].some(k => text.includes(k))) return 'hearing';
-  if (['physical','locomotor','अस्थिव्यंग'].some(k => text.includes(k))) return 'physical';
+  const disabilityMap = [
+    { type: 'blindness', keywords: ['पूर्णतः अंध', 'blindness', 'blind'] },
+    { type: 'low vision', keywords: ['अंशतः अंध', 'low vision', 'partially blind'] },
+    { type: 'hearing impairment', keywords: ['कर्णबधीर', 'hearing impairment', 'deaf'] },
+    { type: 'speech and language disability', keywords: ['वाचा दोष', 'speech disability', 'language disability'] },
+    { type: 'locomotor disability', keywords: ['अस्थिव्यंग', 'locomotor disability', 'physical disability'] },
+    { type: 'mental illness', keywords: ['मानसिक आजार', 'mental illness'] },
+    { type: 'learning disability', keywords: ['अध्ययन अक्षम', 'learning disability'] },
+    { type: 'cerebral palsy', keywords: ['मेंदूचा पक्षाघात', 'cerebral palsy'] },
+    { type: 'autism', keywords: ['स्वमग्न', 'autism'] },
+    { type: 'multiple disability', keywords: ['बहुविकलांग', 'multiple disability'] },
+    { type: 'leprosy cured', keywords: ['कुष्ठरोग', 'leprosy cured'] },
+    { type: 'dwarfism', keywords: ['बुटकेपणा', 'dwarfism'] },
+    { type: 'intellectual disability', keywords: ['बौद्धिक अक्षमता', 'intellectual disability'] },
+    { type: 'muscular disability', keywords: ['माशपेशीय क्षरण', 'muscular disability', 'muscular dystrophy'] },
+    { type: 'chronic neurological conditions', keywords: ['मज्जासंस्थेचे तीव्र आजार', 'chronic neurological conditions'] },
+    { type: 'multiple sclerosis', keywords: ['मल्टिपल स्क्लेरोसिस', 'multiple sclerosis'] },
+    { type: 'thalassemia', keywords: ['थॅलेसिमिया', 'thalassemia'] },
+    { type: 'hemophilia', keywords: ['अधिक रक्तस्त्राव', 'hemophilia'] },
+    { type: 'sickle cell disease', keywords: ['सिकल सेल', 'sickle cell disease', 'sickle cell'] },
+    { type: 'acid attack victim', keywords: ['अॅसिड अटॅक', 'acid attack victim', 'acid attack'] },
+    { type: 'parkinson\'s disease', keywords: ['कंपवात रोग', 'parkinson\'s disease', 'parkinson'] }
+  ];
+
+  for (const { type, keywords } of disabilityMap) {
+    if (keywords.some(keyword => text.includes(keyword.toLowerCase()))) {
+      return type;
+    }
+  }
   return null;
 }
 
@@ -115,7 +141,7 @@ app.post('/api/chat', async (req, res) => {
     const structured = parseStructuredQuery(message);
     const allYojanas = await fetchYojanas();
     if (structured) {
-      const filtered = filterYojanas(allYojanas, structured).slice(0,3);
+      const filtered = filterYojanas(allYojanas, structured); // Return all matching yojanas
       const msg = filtered.length > 0 ? `Found ${filtered.length} schemes matching your criteria.` : "No schemes found for your criteria.";
       return res.json({ message: msg, links: [], yojanas: filtered });
     }
@@ -133,7 +159,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Return filtered Yojanas if age known
     if (session.age && isYojanaQuery) {
-      const filtered = filterYojanas(allYojanas, { age: session.age, disabilityType: session.disability }).slice(0,3);
+      const filtered = filterYojanas(allYojanas, { age: session.age, disabilityType: session.disability }); // Return all matching yojanas
       const msg = filtered.length > 0 ? `Based on your age (${session.age})${session.disability ? ' and disability ('+session.disability+')' : ''}, here are suitable schemes:` : 'No schemes found for your criteria.';
       return res.json({ message: msg, links: [], yojanas: filtered });
     }
