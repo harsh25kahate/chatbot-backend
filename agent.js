@@ -50,9 +50,10 @@ async function fetchYojanas() {
   try {
     const res = await fetch('https://mocki.io/v1/b30e9cf8-f692-4715-b2fc-81523b67f6c7');
     const data = await res.json();
+    console.log('Yojana Data:', JSON.stringify(data, null, 2)); // Log to inspect API response
     return Array.isArray(data) ? data : [];
   } catch (err) {
-    console.error(err);
+    console.error('Error fetching yojanas:', err);
     return [];
   }
 }
@@ -104,18 +105,64 @@ function detectDisability(msg) {
 function parseStructuredQuery(msg) {
   const match = msg.match(/Age: (\d+), Disability: (.+?), Percentage: (\d+)/i);
   if (!match) return null;
-  return { age: parseInt(match[1]), disabilityType: match[2].trim(), percentage: parseInt(match[3]) };
+  const disabilityInput = match[2].trim().toLowerCase();
+  // Normalize disability type to match detectDisability types
+  const disabilityMap = [
+    { type: 'blindness', keywords: ['पूर्णतः अंध', 'blindness', 'blind'] },
+    { type: 'low vision', keywords: ['अंशतः अंध', 'low vision', 'partially blind'] },
+    { type: 'hearing impairment', keywords: ['कर्णबधीर', 'hearing impairment', 'deaf'] },
+    { type: 'speech and language disability', keywords: ['वाचा दोष', 'speech disability', 'language disability'] },
+    { type: 'locomotor disability', keywords: ['अस्थिव्यंग', 'locomotor disability', 'physical disability'] },
+    { type: 'mental illness', keywords: ['मानसिक आजार', 'mental illness'] },
+    { type: 'learning disability', keywords: ['अध्ययन अक्षम', 'learning disability'] },
+    { type: 'cerebral palsy', keywords: ['मेंदूचा पक्षाघात', 'cerebral palsy'] },
+    { type: 'autism', keywords: ['स्वमग्न', 'autism'] },
+    { type: 'multiple disability', keywords: ['बहुविकलांग', 'multiple disability'] },
+    { type: 'leprosy cured', keywords: ['कुष्ठरोग', 'leprosy cured'] },
+    { type: 'dwarfism', keywords: ['बुटकेपणा', 'dwarfism'] },
+    { type: 'intellectual disability', keywords: ['बौद्धिक अक्षमता', 'intellectual disability'] },
+    { type: 'muscular disability', keywords: ['माशपेशीय क्षरण', 'muscular disability', 'muscular dystrophy'] },
+    { type: 'chronic neurological conditions', keywords: ['मज्जासंस्थेचे तीव्र आजार', 'chronic neurological conditions'] },
+    { type: 'multiple sclerosis', keywords: ['मल्टिपल स्क्लेरोसिस', 'multiple sclerosis'] },
+    { type: 'thalassemia', keywords: ['थॅलेसिमिया', 'thalassemia'] },
+    { type: 'hemophilia', keywords: ['अधिक रक्तस्त्राव', 'hemophilia'] },
+    { type: 'sickle cell disease', keywords: ['सिकल सेल', 'sickle cell disease', 'sickle cell'] },
+    { type: 'acid attack victim', keywords: ['अॅसिड अटॅक', 'acid attack victim', 'acid attack'] },
+    { type: 'parkinson\'s disease', keywords: ['कंपवात रोग', 'parkinson\'s disease', 'parkinson'] }
+  ];
+  const matchedDisability = disabilityMap.find(d => d.keywords.some(k => disabilityInput.includes(k.toLowerCase())));
+  return {
+    age: parseInt(match[1]),
+    disabilityType: matchedDisability ? matchedDisability.type : match[2].trim(),
+    percentage: parseInt(match[3])
+  };
 }
 
 // Filter Yojanas
 function filterYojanas(yojanas, criteria) {
-  const { age, disabilityType } = criteria;
+  const { age, disabilityType, percentage, publisher } = criteria;
   return yojanas.filter(y => {
+    // Age filter
     const start = y.Start_Age || 0, end = y.UpTo_Age || 100;
-    const ageMatch = age >= start && age <= end;
-    if (!disabilityType) return ageMatch;
-    const yDis = (y.DisabilityType || '').toLowerCase();
-    return yDis.includes(disabilityType.toLowerCase()) || disabilityType.toLowerCase().includes(yDis);
+    const ageMatch = age ? age >= start && age <= end : true;
+
+    // Disability filter
+    let disabilityMatch = true;
+    if (disabilityType) {
+      const yDis = (y.tblDivyangTypes || '').toLowerCase();
+      const match = yDis.match(/\((.*?)\)/); // Extract English type (e.g., "Blindness")
+      const normalizedDisability = match ? match[1].toLowerCase() : yDis;
+      disabilityMatch = normalizedDisability.includes(disabilityType.toLowerCase()) || 
+                       disabilityType.toLowerCase().includes(normalizedDisability);
+    }
+
+    // Percentage filter
+    const percentageMatch = percentage ? y.tblYojanaDivyangTypePercentages >= percentage : true;
+
+    // Publisher filter
+    const publisherMatch = publisher ? y.PublishedBy.toLowerCase() === publisher.toLowerCase() : true;
+
+    return ageMatch && disabilityMatch && percentageMatch && publisherMatch;
   });
 }
 
@@ -137,12 +184,19 @@ app.post('/api/chat', async (req, res) => {
     if (lowerMsg.includes('login')) return res.json({ message: 'Login here:', links: linkCatalog.login, yojanas: [] });
     if (lowerMsg.includes('register')) return res.json({ message: 'Register here:', links: linkCatalog.register, yojanas: [] });
 
-    // Structured query
+    // Structured query (e.g., "Age: 20, Disability: अध्ययन अक्षम, Percentage: 74")
     const structured = parseStructuredQuery(message);
     const allYojanas = await fetchYojanas();
     if (structured) {
-      const filtered = filterYojanas(allYojanas, structured); // Return all matching yojanas
+      const filtered = filterYojanas(allYojanas, structured);
       const msg = filtered.length > 0 ? `Found ${filtered.length} schemes matching your criteria.` : "No schemes found for your criteria.";
+      return res.json({ message: msg, links: [], yojanas: filtered });
+    }
+
+    // Publisher-based query (e.g., "Tell yojana which are by nagar panchayat")
+    if (lowerMsg.includes('nagar panchayat') && lowerMsg.includes('yojana')) {
+      const filtered = filterYojanas(allYojanas, { publisher: 'nagar panchayat' });
+      const msg = filtered.length > 0 ? `Found ${filtered.length} schemes published by nagar panchayat.` : "No schemes found published by nagar panchayat.";
       return res.json({ message: msg, links: [], yojanas: filtered });
     }
 
@@ -152,16 +206,58 @@ app.post('/api/chat', async (req, res) => {
     if (age) session.age = age;
     if (disability) session.disability = disability;
 
-    const isYojanaQuery = ['yojana','scheme','योजना'].some(k => lowerMsg.includes(k));
+    // General yojana query (e.g., "I am 20 years old with learning disability. Show me yojanas.")
+    const isYojanaQuery = ['yojana', 'scheme', 'योजना'].some(k => lowerMsg.includes(k));
+    if (isYojanaQuery && session.age) {
+      const filtered = filterYojanas(allYojanas, { age: session.age, disabilityType: session.disability });
+      const msg = filtered.length > 0 ? `Based on your age (${session.age})${session.disability ? ' and disability (' + session.disability + ')' : ''}, here are suitable schemes:` : 'No schemes found for your criteria.';
+      return res.json({ message: msg, links: [], yojanas: filtered });
+    }
 
-    // Ask age if missing
+    // Ask age if missing for yojana query
     if (isYojanaQuery && !session.age) return res.json({ message: 'Please provide your age to suggest suitable schemes.', links: [], yojanas: [] });
 
-    // Return filtered Yojanas if age known
-    if (session.age && isYojanaQuery) {
-      const filtered = filterYojanas(allYojanas, { age: session.age, disabilityType: session.disability }); // Return all matching yojanas
-      const msg = filtered.length > 0 ? `Based on your age (${session.age})${session.disability ? ' and disability ('+session.disability+')' : ''}, here are suitable schemes:` : 'No schemes found for your criteria.';
-      return res.json({ message: msg, links: [], yojanas: filtered });
+    // Field-specific queries (e.g., "What is the description of Abhyas Sahayog Yojana?")
+    const fieldKeywords = {
+      name: ['name', 'yojana name', 'नाव'],
+      description: ['description', 'वर्णन'],
+      age: ['age', 'वय', 'age range'],
+      percentage: ['percentage', 'प्रतिशत'],
+      publisher: ['published by', 'प्रकाशक']
+    };
+    const matchedField = Object.keys(fieldKeywords).find(field => 
+      fieldKeywords[field].some(keyword => lowerMsg.includes(keyword))
+    );
+    if (matchedField && isYojanaQuery) {
+      const yojanaNameMatch = lowerMsg.match(/abhyas sahyog yojana/i); // Adjust for other yojana names if needed
+      if (yojanaNameMatch) {
+        const yojana = allYojanas.find(y => y.YojanaName.toLowerCase() === yojanaNameMatch[0].toLowerCase());
+        if (yojana) {
+          let responseMsg;
+          switch (matchedField) {
+            case 'name':
+              responseMsg = `The name of the scheme is ${yojana.YojanaName}.`;
+              break;
+            case 'description':
+              responseMsg = `Description: ${yojana.YojanaDescription}`;
+              break;
+            case 'age':
+              responseMsg = `Age range: ${yojana.Start_Age}–${yojana.UpTo_Age}`;
+              break;
+            case 'percentage':
+              responseMsg = `Disability percentage: ${yojana.tblYojanaDivyangTypePercentages}%`;
+              break;
+            case 'publisher':
+              responseMsg = `Published by: ${yojana.PublishedBy}`;
+              break;
+            default:
+              responseMsg = 'Field not recognized.';
+          }
+          return res.json({ message: responseMsg, links: [], yojanas: [yojana] });
+        } else {
+          return res.json({ message: 'Yojana not found.', links: [], yojanas: [] });
+        }
+      }
     }
 
     // If not a Yojana query → fallback to Gemini AI
@@ -183,8 +279,8 @@ User message: ${message}
       const result = await model.generateContent(prompt);
       let aiResponse = result.response.text();
       let parsed;
-      try { 
-        aiResponse = aiResponse.replace(/```json\n?/g,'').replace(/```\n?/g,'');
+      try {
+        aiResponse = aiResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '');
         parsed = JSON.parse(aiResponse);
       } catch {
         parsed = { message: linkCatalog.fallback, links: [...linkCatalog.login, ...linkCatalog.register], yojanas: [] };
@@ -196,12 +292,12 @@ User message: ${message}
       return res.json({ message: parsed.message || linkCatalog.fallback, links: validLinks, yojanas: [] });
 
     } catch (aiErr) {
-      console.error(aiErr);
+      console.error('Gemini AI error:', aiErr);
       return res.json({ message: linkCatalog.fallback, links: [...linkCatalog.login, ...linkCatalog.register], yojanas: [] });
     }
 
   } catch (err) {
-    console.error(err);
+    console.error('Server error:', err);
     res.status(500).json({ message: 'Internal server error', links: [], yojanas: [] });
   }
 });
