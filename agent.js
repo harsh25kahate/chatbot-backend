@@ -48,11 +48,14 @@ const linkCatalog = {
   register: [
     { label: 'Register on Divyang Portal', url: 'https://divyangparbhani.altwise.in/home/newregistration' }
   ],
-  fallback: "I can help with divyang portal related issues only. Please ask about login, registration, or yojana/schemes."
+  contact: [
+    { label: 'Contact Support', url: 'https://divyangparbhani.altwise.in/home/contact' }
+  ],
+  fallback: "I can help with disability schemes, portal navigation, and answer your queries."
 };
 
-// Session store
-const userContext = new Map();
+// Session store for conversation memory
+const userSessions = new Map();
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -74,76 +77,221 @@ async function fetchYojanas() {
   }
 }
 
-// Function to detect age from message
+// Stage 1: Smart Filtering Functions
+
+// Detect age from message
 function detectAge(message) {
-  const ageMatch = message.match(/\b(\d{1,2})\b/);
-  if (ageMatch) {
-    const age = parseInt(ageMatch[1]);
-    return (age >= 1 && age <= 100) ? age : null;
+  const agePatterns = [
+    /\b(\d{1,2})\s*(?:year|years|वर्ष|साल)/i,
+    /age\s*(?:is\s*)?(\d{1,2})/i,
+    /वय\s*(\d{1,2})/i,
+    /\b(\d{1,2})\s*वर्षाच्या/i
+  ];
+  
+  for (const pattern of agePatterns) {
+    const match = message.match(pattern);
+    if (match) {
+      const age = parseInt(match[1]);
+      return (age >= 1 && age <= 100) ? age : null;
+    }
   }
   return null;
 }
 
-// Function to detect disability from message
-function detectDisability(message) {
+// Detect disability type from message
+function detectDisabilityType(message) {
   const lowerMessage = message.toLowerCase();
   
-  // Check for vision-related keywords
-  if (lowerMessage.includes('blind') || lowerMessage.includes('vision') || lowerMessage.includes('अंध')) {
-    return 'vision';
-  }
+  const disabilityKeywords = {
+    vision: ['blind', 'blindness', 'vision', 'visual', 'sight', 'अंध', 'दृष्टी', 'नेत्र'],
+    hearing: ['deaf', 'hearing', 'audio', 'ear', 'कर्णबधीर', 'श्रवण', 'कान'],
+    physical: ['physical', 'locomotor', 'mobility', 'limb', 'अस्थिव्यंग', 'शारीरिक'],
+    mental: ['mental', 'intellectual', 'cognitive', 'brain', 'मानसिक', 'बौद्धिक'],
+    speech: ['speech', 'language', 'speaking', 'वाचा', 'भाषा']
+  };
   
-  // Check for hearing-related keywords
-  if (lowerMessage.includes('deaf') || lowerMessage.includes('hearing') || lowerMessage.includes('कर्णबधीर')) {
-    return 'hearing';
+  for (const [type, keywords] of Object.entries(disabilityKeywords)) {
+    if (keywords.some(keyword => lowerMessage.includes(keyword))) {
+      return type;
+    }
   }
-  
-  // Check for physical disability keywords
-  if (lowerMessage.includes('physical') || lowerMessage.includes('locomotor') || lowerMessage.includes('अस्थिव्यंग')) {
-    return 'physical';
-  }
-  
   return null;
 }
 
-// Function to parse structured form query
-function parseStructuredQuery(message) {
-  const regex = /Get Yojana for Age: (\d+), Disability: (.+?), Percentage: (\d+)/;
-  const match = message.match(regex);
+// Detect category/purpose from message
+function detectCategory(message) {
+  const lowerMessage = message.toLowerCase();
   
-  if (match) {
+  const categoryKeywords = {
+    education: ['education', 'study', 'school', 'college', 'learning', 'शिक्षण', 'अभ्यास'],
+    employment: ['job', 'employment', 'work', 'career', 'business', 'रोजगार', 'काम'],
+    healthcare: ['health', 'medical', 'treatment', 'therapy', 'आरोग्य', 'वैद्यकीय'],
+    financial: ['money', 'financial', 'pension', 'allowance', 'आर्थिक', 'पेन्शन'],
+    social: ['social', 'marriage', 'family', 'सामाजिक', 'विवाह']
+  };
+  
+  for (const [category, keywords] of Object.entries(categoryKeywords)) {
+    if (keywords.some(keyword => lowerMessage.includes(keyword))) {
+      return category;
+    }
+  }
+  return null;
+}
+
+// Stage 1: Smart Pre-filtering
+function applySmartFilters(yojanas, message) {
+  let filteredYojanas = [...yojanas];
+  
+  // Filter by age if detected
+  const age = detectAge(message);
+  if (age) {
+    filteredYojanas = filteredYojanas.filter(yojana => {
+      const startAge = yojana.Start_Age || 0;
+      const upToAge = yojana.UpTo_Age || 100;
+      return age >= startAge && age <= upToAge;
+    });
+  }
+  
+  // Filter by disability type if detected
+  const disabilityType = detectDisabilityType(message);
+  if (disabilityType) {
+    filteredYojanas = filteredYojanas.filter(yojana => {
+      const yojanaDisability = (yojana.DisabilityType || '').toLowerCase();
+      return yojanaDisability.includes(disabilityType) || 
+             disabilityType === 'physical' && yojanaDisability.includes('locomotor') ||
+             disabilityType === 'vision' && yojanaDisability.includes('blind') ||
+             disabilityType === 'hearing' && yojanaDisability.includes('deaf');
+    });
+  }
+  
+  // Filter by category/purpose if detected
+  const category = detectCategory(message);
+  if (category) {
+    filteredYojanas = filteredYojanas.filter(yojana => {
+      const description = (yojana.Description || '').toLowerCase();
+      const yojanaName = (yojana.YojanaName || '').toLowerCase();
+      const searchText = description + ' ' + yojanaName;
+      
+      switch(category) {
+        case 'education':
+          return searchText.includes('education') || searchText.includes('study') || 
+                 searchText.includes('school') || searchText.includes('शिक्षण');
+        case 'employment':
+          return searchText.includes('employment') || searchText.includes('job') || 
+                 searchText.includes('work') || searchText.includes('रोजगार');
+        case 'healthcare':
+          return searchText.includes('health') || searchText.includes('medical') || 
+                 searchText.includes('treatment') || searchText.includes('आरोग्य');
+        case 'financial':
+          return searchText.includes('pension') || searchText.includes('allowance') || 
+                 searchText.includes('financial') || searchText.includes('आर्थिक');
+        default:
+          return true;
+      }
+    });
+  }
+  
+  // Limit results for cost efficiency (max 15 yojanas to Gemini)
+  return filteredYojanas.slice(0, 15);
+}
+
+// Stage 2: Gemini Processing with conversation memory
+async function processWithGemini(message, filteredYojanas, conversationHistory, context) {
+  if (!genAI) {
     return {
-      age: parseInt(match[1]),
-      disabilityType: match[2].trim(),
-      percentage: parseInt(match[3])
+      message: 'AI service is currently unavailable. Please try again later.',
+      links: [...linkCatalog.login, ...linkCatalog.register, ...linkCatalog.contact]
     };
   }
-  
-  return null;
-}
 
-// Function to filter Yojanas based on criteria
-function filterYojanas(yojanas, criteria) {
-  const { age, disabilityType } = criteria;
-  
-  return yojanas.filter(yojana => {
-    // Check age range - ensure Start_Age and UpTo_Age exist
-    const startAge = yojana.Start_Age || 0;
-    const upToAge = yojana.UpTo_Age || 100;
-    const ageMatch = age >= startAge && age <= upToAge;
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     
-    // If no specific disability type, accept all
-    if (!disabilityType) {
-      return ageMatch;
+    // Build comprehensive system prompt
+    const systemPrompt = `
+You are a helpful assistant for the Divyang (Disability) Portal chatbot. Be natural and conversational.
+
+CONVERSATION HISTORY:
+${conversationHistory.length > 0 ? conversationHistory.map(h => `${h.sender}: ${h.message}`).join('\n') : 'No previous conversation'}
+
+AVAILABLE RESOURCES:
+- Login: ${JSON.stringify(linkCatalog.login)}
+- Register: ${JSON.stringify(linkCatalog.register)}
+- Contact: ${JSON.stringify(linkCatalog.contact)}
+
+YOJANA DATA (Pre-filtered based on user query):
+${JSON.stringify(filteredYojanas, null, 2)}
+
+INSTRUCTIONS:
+1. Respond naturally and conversationally in the user's preferred language (detect from their message)
+2. If user asks about schemes/yojanas, use the provided filtered data
+3. If user needs help with login/registration, provide guidance and include relevant links
+4. If user needs contact support, include the contact link
+5. Be helpful, friendly, and informative
+6. Don't mention that you're an AI or chatbot unless asked
+7. If no relevant yojanas found, explain politely and suggest alternatives
+
+USER MESSAGE: ${message}
+
+Respond in this JSON format:
+{
+  "message": "your conversational response",
+  "links": [{"label": "link name", "url": "url"}] // include relevant links when helpful,
+  "yojanas": [list of relevant yojana objects] // include if discussing specific schemes
+}
+`;
+
+    const result = await model.generateContent(systemPrompt);
+    const response = await result.response;
+    let aiResponse = response.text();
+
+    // Parse AI response
+    let parsedResponse;
+    try {
+      // Clean up markdown formatting
+      aiResponse = aiResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      parsedResponse = JSON.parse(aiResponse);
+    } catch (parseError) {
+      // Fallback if JSON parsing fails
+      parsedResponse = {
+        message: aiResponse || 'I understand your query. How can I assist you further?',
+        links: [],
+        yojanas: filteredYojanas.length > 0 ? filteredYojanas.slice(0, 5) : []
+      };
+    }
+
+    // Validate and clean response
+    if (!parsedResponse.message) {
+      parsedResponse.message = 'I understand your query. How can I assist you further?';
     }
     
-    // Check disability type match - handle undefined DisabilityType
-    const yojanaDisability = yojana.DisabilityType || '';
-    const disabilityMatch = yojanaDisability.toLowerCase().includes(disabilityType.toLowerCase()) ||
-      disabilityType.toLowerCase().includes(yojanaDisability.toLowerCase());
+    // Ensure links are valid
+    const validLinks = [];
+    if (parsedResponse.links && Array.isArray(parsedResponse.links)) {
+      const allKnownLinks = [...linkCatalog.login, ...linkCatalog.register, ...linkCatalog.contact];
+      parsedResponse.links.forEach(link => {
+        const knownLink = allKnownLinks.find(known => 
+          known.url === link.url || known.label === link.label
+        );
+        if (knownLink) {
+          validLinks.push(knownLink);
+        }
+      });
+    }
     
-    return ageMatch && disabilityMatch;
-  });
+    return {
+      message: parsedResponse.message,
+      links: validLinks,
+      yojanas: parsedResponse.yojanas || []
+    };
+
+  } catch (error) {
+    console.error('Gemini AI error:', error);
+    return {
+      message: 'I apologize, but I\'m having trouble processing your request right now. Please try again or contact support for assistance.',
+      links: [...linkCatalog.contact]
+    };
+  }
 }
 
 // Main chat endpoint
@@ -161,198 +309,61 @@ app.post('/api/chat', async (req, res) => {
     const { message, context = {} } = validation.data;
     const userId = context.userId || 'default';
 
-    // Initialize session for user if not exists
-    if (!userContext.has(userId)) {
-      userContext.set(userId, { age: null, disability: null });
+    // Initialize or get session for conversation memory
+    if (!userSessions.has(userId)) {
+      userSessions.set(userId, { conversationHistory: [] });
+    }
+    
+    const session = userSessions.get(userId);
+    
+    // Add user message to conversation history
+    session.conversationHistory.push({ sender: 'user', message });
+    
+    // Keep only last 10 messages to control costs
+    if (session.conversationHistory.length > 10) {
+      session.conversationHistory = session.conversationHistory.slice(-10);
     }
 
-    const session = userContext.get(userId);
-
-    // Handle Login request
-    if (message.toLowerCase().includes('login')) {
-      return res.json({
-        message: 'Here are the login options for Divyang Portal:',
-        links: linkCatalog.login
-      });
-    }
-
-    // Handle Register request
-    if (message.toLowerCase().includes('register')) {
-      return res.json({
-        message: 'Here are the registration options for Divyang Portal:',
-        links: linkCatalog.register
-      });
-    }
-
-    // Check for structured form query first
-    const structuredQuery = parseStructuredQuery(message);
-    if (structuredQuery) {
-      const { age, disabilityType, percentage } = structuredQuery;
-      
-      // Fetch Yojanas
-      const allYojanas = await fetchYojanas();
-      
-      // Filter Yojanas based on criteria
-      const filteredYojanas = filterYojanas(allYojanas, { age, disabilityType });
-      
-      // Return top 3 results
-      const topYojanas = filteredYojanas.slice(0, 3);
-      
-      let responseMessage = '';
-      if (topYojanas.length > 0) {
-        responseMessage = `Based on your age (${age}) and disability type (${disabilityType}), here are the suitable schemes:`;
-      } else {
-        responseMessage = `Sorry, no schemes found for your criteria. Age: ${age}, Disability: ${disabilityType}`;
-      }
-      
-      return res.json({
-        message: responseMessage,
-        yojanas: topYojanas,
-        links: []
-      });
-    }
-
-    // Detect age and disability from message
-    const detectedAge = detectAge(message);
-    const detectedDisability = detectDisability(message);
-
-    // Update session if age or disability detected
-    if (detectedAge) session.age = detectedAge;
-    if (detectedDisability) session.disability = detectedDisability;
-
-    // Check if query mentions Yojana but no age yet
-    const isYojanaQuery = message.toLowerCase().includes('yojana') || 
-                         message.toLowerCase().includes('scheme') || 
-                         message.toLowerCase().includes('योजना');
-
-    if (isYojanaQuery && !session.age && !detectedAge) {
-      return res.json({
-        message: 'Please tell me your age so I can suggest the best schemes for you.',
-        links: []
-      });
-    }
-
-    // If session has age and it's a Yojana query, fetch Yojanas
-    if (session.age && isYojanaQuery) {
-      const allYojanas = await fetchYojanas();
-      
-      // Filter by age and disability if available
-      const criteria = { 
-        age: session.age, 
-        disabilityType: session.disability 
-      };
-      const filteredYojanas = filterYojanas(allYojanas, criteria);
-      
-      // Return top 3 results
-      const topYojanas = filteredYojanas.slice(0, 3);
-      
-      let responseMessage = '';
-      if (session.disability) {
-        responseMessage = `Based on your age (${session.age}) and disability (${session.disability}), here are the suitable schemes:`;
-      } else {
-        responseMessage = `Based on your age (${session.age}), here are the suitable schemes:`;
-      }
-      
-      if (topYojanas.length === 0) {
-        responseMessage = `Sorry, no schemes found for your criteria.`;
-      }
-      
-      return res.json({
-        message: responseMessage,
-        yojanas: topYojanas,
-        links: []
-      });
-    }
-
-    // If no age and not a Yojana query, use Gemini AI
-    if (!genAI) {
-      return res.json({
-        message: 'Developer mode: Set GEMINI_API_KEY to enable AI responses.',
-        links: [...linkCatalog.login, ...linkCatalog.register]
-      });
-    }
-
-    try {
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      
-      // Build system prompt
-      const systemPrompt = `
-You are a helpful assistant for the Divyang (Disability) Portal. 
-Context: ${JSON.stringify(context)}
-
-Available resources:
-- Login links: ${JSON.stringify(linkCatalog.login)}
-- Register links: ${JSON.stringify(linkCatalog.register)}
-
-Rules:
-1. If user asks about Yojana/schemes but no age is provided, ask for age.
-2. If age is provided, help filter schemes based on age and disability.
-3. Respond concisely and factually.
-4. Only use the known links provided above, never invent URLs.
-5. Focus on disability portal related queries only.
-
-User message: ${message}
-
-Respond in JSON format with:
-{
-  "message": "your response message",
-  "links": [{"label": "link name", "url": "actual url"}] // only use known URLs
-}
-`;
-
-      const result = await model.generateContent(systemPrompt);
-      const response = await result.response;
-      let aiResponse = response.text();
-
-      // Try to parse as JSON, fallback to text
-      let parsedResponse;
-      try {
-        // Remove markdown formatting if present
-        aiResponse = aiResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-        parsedResponse = JSON.parse(aiResponse);
-      } catch (parseError) {
-        parsedResponse = {
-          message: aiResponse,
-          links: []
-        };
-      }
-
-      // Validate links against known catalog
-      const validLinks = [];
-      if (parsedResponse.links && Array.isArray(parsedResponse.links)) {
-        const allKnownLinks = [...linkCatalog.login, ...linkCatalog.register];
-        parsedResponse.links.forEach(link => {
-          const knownLink = allKnownLinks.find(known => 
-            known.url === link.url || known.label === link.label
-          );
-          if (knownLink) {
-            validLinks.push(knownLink);
-          }
-        });
-      }
-
-      return res.json({
-        message: parsedResponse.message || 'I can help you with disability portal related queries.',
-        links: validLinks,
-        yojanas: []
-      });
-
-    } catch (aiError) {
-      console.error('Gemini AI error:', aiError);
-      return res.json({
-        message: linkCatalog.fallback,
-        links: [...linkCatalog.login, ...linkCatalog.register]
-      });
-    }
+    // Always fetch fresh Yojana data
+    const allYojanas = await fetchYojanas();
+    
+    // Stage 1: Apply smart pre-filtering
+    const filteredYojanas = applySmartFilters(allYojanas, message);
+    
+    console.log(`Filtered yojanas: ${filteredYojanas.length} out of ${allYojanas.length}`);
+    
+    // Stage 2: Process with Gemini for conversational response
+    const response = await processWithGemini(
+      message, 
+      filteredYojanas, 
+      session.conversationHistory.slice(0, -1), // Don't include current message
+      context
+    );
+    
+    // Add bot response to conversation history
+    session.conversationHistory.push({ sender: 'bot', message: response.message });
+    
+    return res.json(response);
 
   } catch (error) {
     console.error('Chat API error:', error);
     return res.status(500).json({
-      message: 'Internal server error. Please try again later.',
-      links: []
+      message: 'I apologize, but something went wrong. Please try again later or contact our support team.',
+      links: linkCatalog.contact
     });
   }
 });
+
+// Clean up old sessions periodically to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, session] of userSessions.entries()) {
+    // Remove sessions older than 2 hours
+    if (!session.lastActivity || now - session.lastActivity > 2 * 60 * 60 * 1000) {
+      userSessions.delete(userId);
+    }
+  }
+}, 30 * 60 * 1000); // Clean every 30 minutes
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
@@ -360,6 +371,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
   console.log(`🤖 Chat endpoint: http://localhost:${PORT}/api/chat`);
   console.log(`🔑 Gemini AI: ${genAI ? '✅ Enabled' : '❌ Disabled (Set GEMINI_API_KEY)'}`);
+  console.log(`💾 Session cleanup: Every 30 minutes`);
 });
-
-export default app;
