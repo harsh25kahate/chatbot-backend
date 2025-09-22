@@ -106,9 +106,8 @@ function parseStructuredQuery(msg) {
   const match = msg.match(/Age: (\d+), Disability: (.+?), Percentage: (\d+)/i);
   if (!match) return null;
   const disabilityInput = match[2].trim().toLowerCase();
-  // Normalize disability type to match detectDisability types
   const disabilityMap = [
-    { type: 'blindness', keywords: ['पूर्णतः अंध', 'blindness', 'blind'] },
+    { type: 'blindness', keywords: ['पूर्णतः अंध', 'blankness', 'blind'] },
     { type: 'low vision', keywords: ['अंशतः अंध', 'low vision', 'partially blind'] },
     { type: 'hearing impairment', keywords: ['कर्णबधीर', 'hearing impairment', 'deaf'] },
     { type: 'speech and language disability', keywords: ['वाचा दोष', 'speech disability', 'language disability'] },
@@ -163,7 +162,10 @@ function filterYojanas(yojanas, criteria) {
     const publisherMatch = publisher ? y.PublishedBy.toLowerCase() === publisher.toLowerCase() : true;
 
     return ageMatch && disabilityMatch && percentageMatch && publisherMatch;
-  });
+  }).map(y => ({
+    ...y,
+    Disability: y.tblDivyangTypes // Include tblDivyangTypes as Disability in response
+  }));
 }
 
 // Main chat endpoint
@@ -193,30 +195,6 @@ app.post('/api/chat', async (req, res) => {
       return res.json({ message: msg, links: [], yojanas: filtered });
     }
 
-    // Publisher-based query (e.g., "Tell yojana which are by nagar panchayat")
-    if (lowerMsg.includes('nagar panchayat') && lowerMsg.includes('yojana')) {
-      const filtered = filterYojanas(allYojanas, { publisher: 'nagar panchayat' });
-      const msg = filtered.length > 0 ? `Found ${filtered.length} schemes published by nagar panchayat.` : "No schemes found published by nagar panchayat.";
-      return res.json({ message: msg, links: [], yojanas: filtered });
-    }
-
-    // Detect age/disability from message
-    const age = detectAge(message);
-    const disability = detectDisability(message);
-    if (age) session.age = age;
-    if (disability) session.disability = disability;
-
-    // General yojana query (e.g., "I am 20 years old with learning disability. Show me yojanas.")
-    const isYojanaQuery = ['yojana', 'scheme', 'योजना'].some(k => lowerMsg.includes(k));
-    if (isYojanaQuery && session.age) {
-      const filtered = filterYojanas(allYojanas, { age: session.age, disabilityType: session.disability });
-      const msg = filtered.length > 0 ? `Based on your age (${session.age})${session.disability ? ' and disability (' + session.disability + ')' : ''}, here are suitable schemes:` : 'No schemes found for your criteria.';
-      return res.json({ message: msg, links: [], yojanas: filtered });
-    }
-
-    // Ask age if missing for yojana query
-    if (isYojanaQuery && !session.age) return res.json({ message: 'Please provide your age to suggest suitable schemes.', links: [], yojanas: [] });
-
     // Field-specific queries (e.g., "What is the description of Abhyas Sahayog Yojana?")
     const fieldKeywords = {
       name: ['name', 'yojana name', 'नाव'],
@@ -226,12 +204,13 @@ app.post('/api/chat', async (req, res) => {
       publisher: ['published by', 'प्रकाशक']
     };
     const matchedField = Object.keys(fieldKeywords).find(field => 
-      fieldKeywords[field].some(keyword => lowerMsg.includes(keyword))
+      fieldKeywords[field].some(keyword => lowerMsg.includes(keyword.toLowerCase()))
     );
-    if (matchedField && isYojanaQuery) {
-      const yojanaNameMatch = lowerMsg.match(/abhyas sahyog yojana/i); // Adjust for other yojana names if needed
+    if (matchedField) {
+      const yojanaNameMatch = lowerMsg.match(/(.+?)(?=\s*(name|description|age|percentage|published by|$))/i);
       if (yojanaNameMatch) {
-        const yojana = allYojanas.find(y => y.YojanaName.toLowerCase() === yojanaNameMatch[0].toLowerCase());
+        const yojanaName = yojanaNameMatch[1].trim().toLowerCase();
+        const yojana = allYojanas.find(y => y.YojanaName.toLowerCase() === yojanaName);
         if (yojana) {
           let responseMsg;
           switch (matchedField) {
@@ -253,11 +232,57 @@ app.post('/api/chat', async (req, res) => {
             default:
               responseMsg = 'Field not recognized.';
           }
-          return res.json({ message: responseMsg, links: [], yojanas: [yojana] });
+          return res.json({ 
+            message: responseMsg, 
+            links: [], 
+            yojanas: [{ ...yojana, Disability: yojana.tblDivyangTypes }] 
+          });
         } else {
           return res.json({ message: 'Yojana not found.', links: [], yojanas: [] });
         }
       }
+    }
+
+    // Publisher-based query (e.g., "Tell yojana which are by nagar panchayat" or "all yojna under nagar panchayat")
+    if (lowerMsg.includes('nagar panchayat') && (lowerMsg.includes('yojana') || lowerMsg.includes('under') || lowerMsg.includes('by'))) {
+      const filtered = filterYojanas(allYojanas, { publisher: 'nagar panchayat' });
+      const msg = filtered.length > 0 ? `Found ${filtered.length} schemes published by nagar panchayat.` : "No schemes found published by nagar panchayat.";
+      return res.json({ message: msg, links: [], yojanas: filtered });
+    }
+
+    // Detect age/disability from message
+    const age = detectAge(message);
+    const disability = detectDisability(message);
+    if (age) session.age = age;
+    if (disability) session.disability = disability;
+
+    // General yojana query (e.g., "I am 20 years old with learning disability. Show me yojanas.")
+    const isYojanaQuery = ['yojana', 'scheme', 'योजना'].some(k => lowerMsg.includes(k.toLowerCase()));
+    if (isYojanaQuery) {
+      // Handle disability-only queries (e.g., "if i am blind is there any yojna")
+      if (disability || session.disability) {
+        const queryDisability = disability || session.disability;
+        const filtered = filterYojanas(allYojanas, { disabilityType: queryDisability });
+        const msg = filtered.length > 0 ? `Found ${filtered.length} schemes for ${queryDisability}.` : `No schemes found for ${queryDisability}.`;
+        return res.json({ message: msg, links: [], yojanas: filtered });
+      }
+      // Handle age-only queries (e.g., "my age is 32 is there any yojna")
+      if (age || session.age) {
+        const queryAge = age || session.age;
+        if (session.disability) {
+          const filtered = filterYojanas(allYojanas, { age: queryAge, disabilityType: session.disability });
+          const msg = filtered.length > 0 ? `Based on your age (${queryAge}) and disability (${session.disability}), here are suitable schemes:` : 'No schemes found for your criteria.';
+          return res.json({ message: msg, links: [], yojanas: filtered });
+        } else {
+          return res.json({ 
+            message: 'Please provide your disability type to suggest suitable schemes. For example, mention if you have blindness, hearing impairment, etc.', 
+            links: [], 
+            yojanas: [] 
+          });
+        }
+      }
+      // Ask for age if missing
+      return res.json({ message: 'Please provide your age and disability type to suggest suitable schemes.', links: [], yojanas: [] });
     }
 
     // If not a Yojana query → fallback to Gemini AI
