@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 import fetch from 'node-fetch';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import https from "https";
 
 dotenv.config();
 
@@ -68,16 +69,22 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // Fetch Yojanas with error handling
 async function fetchYojanas() {
   try {
-    const res = await fetch('https://mocki.io/v1/b30e9cf8-f692-4715-b2fc-81523b67f6c7');
-    if (!res.ok) throw new Error('API response not ok');
+    const agent = new https.Agent({ rejectUnauthorized: false });
+
+    const res = await fetch(
+      "https://mocki.io/v1/b30e9cf8-f692-4715-b2fc-81523b67f6c7",
+      // "https://divyangparbhani.altwise.in/api/value/yojanas",
+      { agent }
+    );
+
+    if (!res.ok) throw new Error("API response not ok");
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   } catch (err) {
-    console.error('Error fetching yojanas:', err);
+    console.error("Error fetching yojanas:", err);
     return [];
   }
 }
-
 // Main chat endpoint
 app.post('/api/chat', async (req, res) => {
   try {
