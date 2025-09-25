@@ -48,19 +48,10 @@ function initializeSession(userId) {
   if (!userSessions.has(userId)) {
     userSessions.set(userId, {
       conversationHistory: [],
-      lastLanguage: 'en' // Default language
+      lastLanguage: 'mr' // Force Marathi
     });
   }
   return userSessions.get(userId);
-}
-
-// Detect user language from message
-function detectLanguage(message) {
-  const marathiRegex = /[\u0900-\u097F]/; // Devanagari script for Marathi/Hindi
-  const hindiRegex = /[\u0900-\u097F]/; // Same script for Hindi
-  if (marathiRegex.test(message)) return 'mr';
-  if (hindiRegex.test(message)) return 'hi';
-  return 'en';
 }
 
 // Health check
@@ -85,13 +76,14 @@ async function fetchYojanas() {
     return [];
   }
 }
+
 // Main chat endpoint
 app.post('/api/chat', async (req, res) => {
   try {
     const validation = chatRequestSchema.safeParse(req.body);
     if (!validation.success) {
       return res.status(400).json({ 
-        message: 'Invalid request', 
+        message: 'प्रिय दिव्यांग, अयशस्वी विनंती. कृपया पुन्हा प्रयत्न करा.', 
         errors: validation.error.errors,
         links: [],
         yojanas: []
@@ -102,8 +94,8 @@ app.post('/api/chat', async (req, res) => {
     const userId = context.userId || 'default';
     const session = initializeSession(userId);
     
-    // Detect user language
-    const userLanguage = context.locale || detectLanguage(message);
+    // Force Marathi language for all responses
+    const userLanguage = 'mr';
     session.lastLanguage = userLanguage;
 
     // Add user message to conversation history
@@ -116,19 +108,17 @@ app.post('/api/chat', async (req, res) => {
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const prompt = `
 You are a friendly assistant for the Divyang Portal in India. 
-Always respond in the user's language: Marathi (mr), Hindi (hi), or English (en).
-For greetings like "hello," "hi," "नमस्कार," "how are you," or similar, respond conversationally with a matching greeting and offer help without including links (e.g., "हाय! मी ठीक आहे, तुम्हाला कशी मदत करू?").
+Always respond in Marathi (mr) and address the user respectfully as "प्रिय दिव्यांग" in the response message.
+Understand the user's query naturally, regardless of the input language, and respond conversationally in Marathi.
+For greetings like "hello," "hi," "नमस्कार," "how are you," or similar, respond conversationally with a matching greeting and offer help without including links (e.g., "प्रिय दिव्यांग, नमस्कार! तुम्हाला कशी मदत करू?").
 Focus on portal-related queries: login, registration, or yojanas for disabled persons.
-For login queries (e.g., containing "login," "लॉगिन," or "sign in"), provide only: [{ label: 'Login to Divyang Portal', url: 'https://divyangahilyanagar.altwise.in/home/login' }]
-For registration queries (e.g., containing "register," "नोंदणी," or "registration"), provide only: [{ label: 'Register on Divyang Portal', url: 'https://divyangahilyanagar.altwise.in/home/newregistration' }]
+For login queries (e.g., containing "login," "लॉगिन," or "sign in"), provide only: [{ label: 'दिव्यांग पोर्टलवर लॉगिन करा', url: 'https://divyangahilyanagar.altwise.in/home/login' }]
+For registration queries (e.g., containing "register," "नोंदणी," or "registration"), provide only: [{ label: 'दिव्यांग पोर्टलवर नोंदणी करा', url: 'https://divyangahilyanagar.altwise.in/home/newregistration' }]
 For yojana queries, use the provided yojanas data to filter based on user criteria (age, disability type, percentage, publisher, etc.).
 Extract criteria naturally from the user message.
-If no matching yojanas, respond politely with no results found.
+If no matching yojanas, respond politely with no results found (e.g., "प्रिय दिव्यांग, तुमच्या निकषांशी जुळणारी कोणतीही योजना सापडली नाही.").
 For out-of-scope queries (e.g., contact info), respond politely without mentioning limits. Gently suggest visiting the portal for more details and offer help with login, registration, or schemes without including links unless explicitly requested. 
-Example for out-of-scope: 
-- Marathi: "हाय! अधिक माहितीसाठी आमच्या पोर्टलला भेट द्या. तुम्हाला लॉगिन, नोंदणी किंवा योजनांबद्दल मदत हवी आहे का?"
-- Hindi: "हाय! अधिक जानकारी के लिए हमारे पोर्टल पर जाएँ। क्या आपको लॉगिन, रजिस्ट्रेशन या योजनाओं के बारे में मदद चाहिए?"
-- English: "Hi! For more details, please visit our portal. Can I help with login, registration, or schemes?"
+Example for out-of-scope: "प्रिय दिव्यांग, अधिक माहितीसाठी आमच्या पोर्टलला भेट द्या. तुम्हाला लॉगिन, नोंदणी किंवा योजनांबद्दल मदत हवी आहे का?"
 Do not include links unless the query explicitly mentions login or registration.
 Avoid hardcoded responses; understand the user's intent naturally and respond conversationally.
 Keep responses concise, friendly, and engaging.
@@ -144,7 +134,7 @@ Conversation history: ${JSON.stringify(session.conversationHistory.slice(-3))} /
 
 Respond strictly in this JSON format:
 {
-  "message": "your friendly response text",
+  "message": "your friendly response text starting with 'प्रिय दिव्यांग'",
   "links": [] or array of link objects like [{ label: 'text', url: 'url' }],
   "yojanas": [] or array of matching yojana objects (include all fields, add DisabilityType: tblDivyangTypes if needed)
 }
@@ -162,9 +152,7 @@ Do not add extra text outside JSON.
     } catch (parseError) {
       console.error('AI response parsing error:', parseError);
       parsed = {
-        message: userLanguage === 'mr' ? 'हाय! माफ करा, काहीतरी चुकलं. कृपया पुन्हा प्रयत्न करा.' :
-                 userLanguage === 'hi' ? 'हाय! माफ करें, कुछ गलत हो गया। कृपया फिर से कोशिश करें।' :
-                 'Hi! Sorry, something went wrong. Please try again.',
+        message: 'प्रिय दिव्यांग, माफ करा, काहीतरी चुकलं. कृपया पुन्हा प्रयत्न करा.',
         links: [],
         yojanas: []
       };
@@ -181,11 +169,8 @@ Do not add extra text outside JSON.
 
   } catch (err) {
     console.error('Error:', err);
-    const errorMessage = session?.lastLanguage === 'mr' ? 'हाय! माफ करा, सर्व्हरमध्ये त्रुटी आली आहे.' :
-                        session?.lastLanguage === 'hi' ? 'हाय! माफ करें, सर्वर में त्रुटि हुई है।' :
-                        'Hi! Sorry, a server error occurred.';
     res.status(500).json({ 
-      message: errorMessage,
+      message: 'प्रिय दिव्यांग, माफ करा, सर्व्हरमध्ये त्रुटी आली आहे.',
       links: [],
       yojanas: []
     });
