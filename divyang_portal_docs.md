@@ -37,7 +37,7 @@ The Divyang Portal API is a Node.js-based chatbot service designed to help disab
 ### Technology Stack
 - **Runtime**: Node.js with ES6 modules
 - **Framework**: Express.js
-- **AI Service**: Google Gemini AI (gemini-1.5-flash)
+- **AI Service**: Google Gemini AI (gemini-2.0-flash)
 - **Validation**: Zod schema validation
 - **HTTP Client**: node-fetch
 - **Environment**: dotenv for configuration
