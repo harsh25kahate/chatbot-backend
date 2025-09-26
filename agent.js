@@ -105,7 +105,7 @@ app.post('/api/chat', async (req, res) => {
     const allYojanas = await fetchYojanas();
 
     // Prepare prompt for Gemini with optimized conversation logic
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
     const prompt = `
 You are a friendly assistant for the Divyang Portal in India. 
 Always respond in Marathi (mr) and address the user respectfully as "प्रिय दिव्यांग" in the response message.
